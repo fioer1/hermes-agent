@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -90,19 +92,19 @@ def make_tool_call_id() -> str:
 
 def build_tool_title(tool_name: str, args: Dict[str, Any]) -> str:
     """Build a human-readable title for a tool call."""
+    path = _normalize_editor_path(args.get("path", ""))
     if tool_name == "terminal":
         cmd = args.get("command", "")
         if len(cmd) > 80:
             cmd = cmd[:77] + "..."
         return f"terminal: {cmd}"
     if tool_name == "read_file":
-        return f"read: {args.get('path', '?')}"
+        return f"read: {path or '?'}"
     if tool_name == "write_file":
-        return f"write: {args.get('path', '?')}"
+        return f"write: {path or '?'}"
     if tool_name == "patch":
         mode = args.get("mode", "replace")
-        path = args.get("path", "?")
-        return f"patch ({mode}): {path}"
+        return f"patch ({mode}): {path or '?'}"
     if tool_name == "search_files":
         return f"search: {args.get('pattern', '?')}"
     if tool_name == "web_search":
@@ -930,34 +932,35 @@ def build_tool_start(
     arguments: Dict[str, Any],
 ) -> ToolCallStart:
     """Create a ToolCallStart event for the given hermes tool invocation."""
+    normalized_arguments = _normalize_tool_arguments(arguments)
     kind = get_tool_kind(tool_name)
-    title = build_tool_title(tool_name, arguments)
-    locations = extract_locations(arguments)
+    title = build_tool_title(tool_name, normalized_arguments)
+    locations = extract_locations(normalized_arguments)
 
     if tool_name == "patch":
-        mode = arguments.get("mode", "replace")
+        mode = normalized_arguments.get("mode", "replace")
         if mode == "replace":
-            path = arguments.get("path", "")
-            old = arguments.get("old_string", "")
-            new = arguments.get("new_string", "")
+            path = normalized_arguments.get("path", "")
+            old = normalized_arguments.get("old_string", "")
+            new = normalized_arguments.get("new_string", "")
             content = [acp.tool_diff_content(path=path, new_text=new, old_text=old)]
         else:
-            patch_text = arguments.get("patch", "")
+            patch_text = normalized_arguments.get("patch", "")
             content = _build_patch_mode_content(patch_text)
         return acp.start_tool_call(
             tool_call_id, title, kind=kind, content=content, locations=locations,
         )
 
     if tool_name == "write_file":
-        path = arguments.get("path", "")
-        file_content = arguments.get("content", "")
+        path = normalized_arguments.get("path", "")
+        file_content = normalized_arguments.get("content", "")
         content = [acp.tool_diff_content(path=path, new_text=file_content)]
         return acp.start_tool_call(
             tool_call_id, title, kind=kind, content=content, locations=locations,
         )
 
     if tool_name == "terminal":
-        command = arguments.get("command", "")
+        command = normalized_arguments.get("command", "")
         content = [_text(f"$ {command}")]
         return acp.start_tool_call(
             tool_call_id, title, kind=kind, content=content, locations=locations,
@@ -972,9 +975,9 @@ def build_tool_start(
         )
 
     if tool_name == "search_files":
-        pattern = arguments.get("pattern", "")
-        target = arguments.get("target", "content")
-        search_path = arguments.get("path")
+        pattern = normalized_arguments.get("pattern", "")
+        target = normalized_arguments.get("target", "content")
+        search_path = normalized_arguments.get("path")
         where = f" in {search_path}" if search_path else ""
         content = [_text(f"Searching for '{pattern}' ({target}){where}")]
         return acp.start_tool_call(
@@ -982,7 +985,7 @@ def build_tool_start(
         )
 
     if tool_name == "todo":
-        items = arguments.get("todos")
+        items = normalized_arguments.get("todos")
         if isinstance(items, list):
             preview_lines = ["Updating todo list", ""]
             for item in items[:8]:
@@ -998,40 +1001,40 @@ def build_tool_start(
         )
 
     if tool_name == "skill_view":
-        name = str(arguments.get("name") or "?").strip() or "?"
-        file_path = str(arguments.get("file_path") or "SKILL.md").strip() or "SKILL.md"
+        name = str(normalized_arguments.get("name") or "?").strip() or "?"
+        file_path = str(normalized_arguments.get("file_path") or "SKILL.md").strip() or "SKILL.md"
         content = [_text(f"Loading skill '{name}' ({file_path})")]
         return acp.start_tool_call(
             tool_call_id, title, kind=kind, content=content, locations=locations,
         )
 
     if tool_name == "skill_manage":
-        action = str(arguments.get("action") or "manage").strip() or "manage"
-        name = str(arguments.get("name") or "?").strip() or "?"
-        file_path = str(arguments.get("file_path") or "SKILL.md").strip() or "SKILL.md"
+        action = str(normalized_arguments.get("action") or "manage").strip() or "manage"
+        name = str(normalized_arguments.get("name") or "?").strip() or "?"
+        file_path = str(normalized_arguments.get("file_path") or "SKILL.md").strip() or "SKILL.md"
         path = f"skills/{name}/{file_path}" if file_path else f"skills/{name}"
 
         if action == "patch":
-            old = str(arguments.get("old_string") or "")
-            new = str(arguments.get("new_string") or "")
+            old = str(normalized_arguments.get("old_string") or "")
+            new = str(normalized_arguments.get("new_string") or "")
             content = [acp.tool_diff_content(path=path, old_text=old or None, new_text=new)]
         elif action in {"edit", "create"}:
             content = [
                 acp.tool_diff_content(
                     path=path,
-                    new_text=str(arguments.get("content") or ""),
+                    new_text=str(normalized_arguments.get("content") or ""),
                 )
             ]
         elif action == "write_file":
-            target = str(arguments.get("file_path") or "file")
+            target = str(normalized_arguments.get("file_path") or "file")
             content = [
                 acp.tool_diff_content(
                     path=f"skills/{name}/{target}",
-                    new_text=str(arguments.get("file_content") or ""),
+                    new_text=str(normalized_arguments.get("file_content") or ""),
                 )
             ]
         elif action in {"delete", "remove_file"}:
-            target = str(arguments.get("file_path") or file_path or name)
+            target = str(normalized_arguments.get("file_path") or file_path or name)
             content = [_text(f"Removing {target} from skill '{name}'")]
         else:
             content = [_text(f"Running skill_manage action '{action}' on skill '{name}' ({file_path})")]
@@ -1041,7 +1044,7 @@ def build_tool_start(
         )
 
     if tool_name == "execute_code":
-        code = str(arguments.get("code") or "").strip()
+        code = str(normalized_arguments.get("code") or "").strip()
         preview = code[:1200] + (f"\n... ({len(code)} chars total, truncated)" if len(code) > 1200 else "")
         content = [_text(f"Running Python helper script:\n\n```python\n{preview}\n```" if preview else "Running Python helper script")]
         return acp.start_tool_call(
@@ -1049,7 +1052,7 @@ def build_tool_start(
         )
 
     if tool_name == "web_search":
-        query = str(arguments.get("query") or "").strip()
+        query = str(normalized_arguments.get("query") or "").strip()
         content = [_text(f"Searching the web for: {query}" if query else "Searching the web")]
         return acp.start_tool_call(
             tool_call_id, title, kind=kind, content=content, locations=locations,
@@ -1063,9 +1066,9 @@ def build_tool_start(
         )
 
     if tool_name == "process":
-        action = str(arguments.get("action") or "").strip() or "manage"
-        sid = str(arguments.get("session_id") or "").strip()
-        data_preview = str(arguments.get("data") or "").strip()
+        action = str(normalized_arguments.get("action") or "").strip() or "manage"
+        sid = str(normalized_arguments.get("session_id") or "").strip()
+        data_preview = str(normalized_arguments.get("data") or "").strip()
         text = f"Process action: {action}" + (f"\nSession: {sid}" if sid else "")
         if data_preview:
             text += "\nInput: " + _truncate_text(data_preview, limit=500)
@@ -1075,7 +1078,7 @@ def build_tool_start(
         )
 
     if tool_name == "delegate_task":
-        tasks = arguments.get("tasks")
+        tasks = normalized_arguments.get("tasks")
         if isinstance(tasks, list) and tasks:
             lines = [f"Delegating {len(tasks)} tasks", ""]
             for i, task in enumerate(tasks[:8], 1):
@@ -1087,23 +1090,23 @@ def build_tool_start(
                 lines.append(f"... {len(tasks) - 8} more")
             content = [_text("\n".join(lines))]
         else:
-            goal = str(arguments.get("goal") or "").strip()
+            goal = str(normalized_arguments.get("goal") or "").strip()
             content = [_text("Delegating task" + (f":\n{_truncate_text(goal, limit=800)}" if goal else ""))]
         return acp.start_tool_call(
             tool_call_id, title, kind=kind, content=content, locations=locations,
         )
 
     if tool_name == "session_search":
-        query = str(arguments.get("query") or "").strip()
+        query = str(normalized_arguments.get("query") or "").strip()
         content = [_text(f"Searching past sessions for: {query}" if query else "Loading recent sessions")]
         return acp.start_tool_call(
             tool_call_id, title, kind=kind, content=content, locations=locations,
         )
 
     if tool_name == "memory":
-        action = str(arguments.get("action") or "manage").strip() or "manage"
-        target = str(arguments.get("target") or "memory").strip() or "memory"
-        preview = str(arguments.get("content") or arguments.get("old_text") or "").strip()
+        action = str(normalized_arguments.get("action") or "manage").strip() or "manage"
+        target = str(normalized_arguments.get("target") or "memory").strip() or "memory"
+        preview = str(normalized_arguments.get("content") or normalized_arguments.get("old_text") or "").strip()
         text = f"Memory {action} ({target})"
         if preview:
             text += "\nPreview: " + _truncate_text(preview, limit=500)
@@ -1114,9 +1117,9 @@ def build_tool_start(
 
     if tool_name in _POLISHED_TOOLS:
         try:
-            args_text = json.dumps(arguments, indent=2, default=str)
+            args_text = json.dumps(normalized_arguments, indent=2, default=str)
         except (TypeError, ValueError):
-            args_text = str(arguments)
+            args_text = str(normalized_arguments)
         content = [_text(_truncate_text(args_text, limit=1200))]
         return acp.start_tool_call(
             tool_call_id, title, kind=kind, content=content, locations=locations,
@@ -1125,13 +1128,13 @@ def build_tool_start(
     # Generic fallback
     import json
     try:
-        args_text = json.dumps(arguments, indent=2, default=str)
+        args_text = json.dumps(normalized_arguments, indent=2, default=str)
     except (TypeError, ValueError):
-        args_text = str(arguments)
+        args_text = str(normalized_arguments)
     content = [acp.tool_content(acp.text_block(args_text))]
     return acp.start_tool_call(
         tool_call_id, title, kind=kind, content=content, locations=locations,
-        raw_input=None if tool_name in _POLISHED_TOOLS else arguments,
+        raw_input=None if tool_name in _POLISHED_TOOLS else normalized_arguments,
     )
 
 
@@ -1173,8 +1176,40 @@ def extract_locations(
 ) -> List[ToolCallLocation]:
     """Extract file-system locations from tool arguments."""
     locations: List[ToolCallLocation] = []
-    path = arguments.get("path")
+    path = _normalize_editor_path(arguments.get("path"))
     if path:
         line = arguments.get("offset") or arguments.get("line")
         locations.append(ToolCallLocation(path=path, line=line))
     return locations
+
+
+def _normalize_editor_path(path: str) -> str:
+    """Convert common WSL/MSYS drive paths to native Windows paths for ACP UIs."""
+    if os.name != "nt" or not isinstance(path, str) or not path.startswith("/"):
+        return path
+
+    normalized = path.replace("\\", "/")
+
+    mnt_match = re.match(r"^/mnt/([a-zA-Z])(?:/(.*))?$", normalized)
+    if mnt_match:
+        drive = mnt_match.group(1).upper()
+        rest = (mnt_match.group(2) or "").replace("/", "\\")
+        return f"{drive}:\\" + rest if rest else f"{drive}:\\"
+
+    msys_match = re.match(r"^/([a-zA-Z])(?:/(.*))?$", normalized)
+    if msys_match:
+        drive = msys_match.group(1).upper()
+        rest = (msys_match.group(2) or "").replace("/", "\\")
+        return f"{drive}:\\" + rest if rest else f"{drive}:\\"
+
+    return path
+
+
+def _normalize_tool_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize known path-like argument fields before sending ACP updates."""
+    normalized = dict(arguments)
+    for key in ("path", "src", "dst", "cwd", "workdir"):
+        value = normalized.get(key)
+        if isinstance(value, str):
+            normalized[key] = _normalize_editor_path(value)
+    return normalized

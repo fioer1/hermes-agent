@@ -44,6 +44,106 @@ hindsight-embed -p hermes ui start
 
 Points the plugin at an existing Hindsight instance you're already running (Docker, self-hosted, etc.). No daemon management — just a URL and an optional API key.
 
+## Instrument: Shared Local Hindsight Over Tailscale
+
+Reusable pattern for this setup:
+
+- one machine runs Hindsight locally
+- a second Hermes instance runs on a cloud VM
+- both machines join the same Tailscale tailnet
+- the remote Hermes uses `local_external` to reach the host over its Tailscale IP
+
+This keeps Hindsight private and avoids exposing port `8888` directly to the public internet.
+
+### Topology
+
+- **Hindsight host**: local Windows/Linux machine running the Hindsight API
+- **Remote Hermes**: cloud VM running Hermes
+- **Transport**: Tailscale only
+
+Example:
+
+- local Hindsight host Tailscale IP: `100.89.165.32`
+- remote Hermes VM Tailscale IP: `100.115.11.34`
+- remote Hermes Hindsight URL: `http://100.89.165.32:8888`
+
+### Host Checklist
+
+1. Start Hindsight locally and confirm the API is healthy:
+
+```bash
+curl http://127.0.0.1:8888/openapi.json
+```
+
+2. Join the host machine to the same Tailscale tailnet as the remote Hermes machine.
+3. Keep Hindsight bound locally/private; Tailscale is the access path.
+
+### Remote Hermes Config
+
+On the remote machine, configure:
+
+`~/.hermes/hindsight/config.json`
+
+```json
+{
+  "mode": "local_external",
+  "api_url": "http://100.89.165.32:8888",
+  "bank_id": "hermes",
+  "recall_budget": "mid",
+  "memory_mode": "hybrid",
+  "auto_recall": true,
+  "auto_retain": true,
+  "retain_async": true,
+  "retain_context": "conversation between Hermes Agent and the User"
+}
+```
+
+And ensure the main Hermes config enables the provider:
+
+```yaml
+memory:
+  provider: hindsight
+```
+
+### Validation
+
+From the remote machine:
+
+```bash
+curl http://100.89.165.32:8888/openapi.json
+curl http://100.89.165.32:8888/health
+```
+
+Provider sanity check:
+
+```bash
+python -c "from plugins.memory.hindsight import HindsightMemoryProvider; p=HindsightMemoryProvider(); print(p.is_available())"
+```
+
+Optional end-to-end check:
+
+```bash
+python - <<'PY'
+from plugins.memory.hindsight import HindsightMemoryProvider
+
+p = HindsightMemoryProvider()
+p.initialize(session_id='tailscale-test')
+print(p.handle_tool_call('hindsight_retain', {
+    'content': 'Remote Hermes reached local Hindsight over Tailscale.',
+    'context': 'tailscale connectivity test',
+}))
+print(p.handle_tool_call('hindsight_recall', {
+    'query': 'Tailscale connectivity test',
+}))
+PY
+```
+
+### Notes
+
+- If multiple Hermes instances share one backend, consider separate `bank_id`s unless they truly share one memory space.
+- The local Hindsight host must stay online for remote Hermes to use it.
+- Tailscale is the recommended transport for this pattern because it gives private reachability without opening a public listener.
+
 ## Config
 
 Config file: `~/.hermes/hindsight/config.json`

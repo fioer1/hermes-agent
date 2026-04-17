@@ -560,6 +560,57 @@ class TestPersistence:
         assert restored.agent.provider == "anthropic"
         assert restored.agent.base_url == "https://anthropic.example/v1"
 
+    def test_restore_uses_current_custom_endpoint_when_config_changed(self, tmp_path, monkeypatch):
+        """Restored custom ACP sessions should not pin a stale base_url snapshot."""
+        runtime_choice = {"base_url": "https://old-custom.example/v1"}
+
+        def fake_resolve_runtime_provider(requested=None, **kwargs):
+            return {
+                "provider": "custom",
+                "api_mode": "chat_completions",
+                "base_url": runtime_choice["base_url"],
+                "api_key": "no-key-required",
+                "command": None,
+                "args": [],
+                "requested_provider": requested or "custom",
+            }
+
+        def fake_agent(**kwargs):
+            return SimpleNamespace(
+                model=kwargs.get("model"),
+                provider=kwargs.get("provider"),
+                base_url=kwargs.get("base_url"),
+                api_mode=kwargs.get("api_mode"),
+            )
+
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+            "model": {
+                "provider": "custom",
+                "default": "test-model",
+                "base_url": runtime_choice["base_url"],
+            }
+        })
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            fake_resolve_runtime_provider,
+        )
+        db = SessionDB(tmp_path / "state.db")
+
+        with patch("run_agent.AIAgent", side_effect=fake_agent):
+            manager = SessionManager(db=db)
+            state = manager.create_session(cwd="/work")
+            manager.save_session(state.session_id)
+
+            with manager._lock:
+                del manager._sessions[state.session_id]
+
+            runtime_choice["base_url"] = "https://new-custom.example/v1"
+            restored = manager.get_session(state.session_id)
+
+        assert restored is not None
+        assert restored.agent.provider == "custom"
+        assert restored.agent.base_url == "https://new-custom.example/v1"
+
     def test_acp_agents_route_human_output_to_stderr(self, tmp_path, monkeypatch):
         """ACP agents must keep stdout clean for JSON-RPC stdio transport."""
 

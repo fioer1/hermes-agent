@@ -166,6 +166,20 @@ def _clear_task_cwd(task_id: str) -> None:
         logger.debug("Failed to clear ACP task cwd override", exc_info=True)
 
 
+def _normalize_base_url(value: Any) -> str:
+    """Normalize a provider base URL for equality checks."""
+    return str(value or "").strip().rstrip("/")
+
+
+def _restored_custom_endpoint_is_stale(runtime: Dict[str, Any], base_url: str | None) -> bool:
+    """Return True when a restored custom URL differs from current config."""
+    if str(runtime.get("provider") or "").strip().lower() != "custom":
+        return False
+    restored_base_url = _normalize_base_url(base_url)
+    current_base_url = _normalize_base_url(runtime.get("base_url"))
+    return bool(restored_base_url and current_base_url and restored_base_url != current_base_url)
+
+
 @dataclass
 class SessionState:
     """Tracks per-session state for an ACP-managed Hermes agent."""
@@ -606,11 +620,23 @@ class SessionManager:
 
         try:
             runtime = resolve_runtime_provider(requested=requested_provider or config_provider)
+            effective_base_url = base_url
+            effective_api_mode = api_mode
+            if _restored_custom_endpoint_is_stale(runtime, base_url):
+                logger.info(
+                    "ACP session %s: ignoring stale restored custom endpoint %s; "
+                    "current config resolves to %s",
+                    session_id,
+                    _normalize_base_url(base_url),
+                    _normalize_base_url(runtime.get("base_url")),
+                )
+                effective_base_url = None
+                effective_api_mode = None
             kwargs.update(
                 {
                     "provider": runtime.get("provider"),
-                    "api_mode": api_mode or runtime.get("api_mode"),
-                    "base_url": base_url or runtime.get("base_url"),
+                    "api_mode": effective_api_mode or runtime.get("api_mode"),
+                    "base_url": effective_base_url or runtime.get("base_url"),
                     "api_key": runtime.get("api_key"),
                     "command": runtime.get("command"),
                     "args": list(runtime.get("args") or []),

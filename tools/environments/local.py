@@ -189,17 +189,34 @@ def _find_bash() -> str:
     if custom and os.path.isfile(custom):
         return custom
 
-    found = shutil.which("bash")
-    if found:
-        return found
-
-    for candidate in (
+    git_bash_candidates = (
         os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
         os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin", "bash.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "bin", "bash.exe"),
-    ):
+    )
+    for candidate in git_bash_candidates:
         if candidate and os.path.isfile(candidate):
             return candidate
+
+    found = shutil.which("bash")
+    if found:
+        normalized = os.path.normcase(os.path.normpath(found))
+        looks_like_wsl_launcher = (
+            normalized.endswith(os.path.normcase(r"\Windows\System32\bash.exe"))
+            or r"\Microsoft\WindowsApps\bash.exe" in normalized
+        )
+        if not looks_like_wsl_launcher:
+            return found
+
+    for candidate in git_bash_candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+
+    if found:
+        logger.warning(
+            "Ignoring Windows bash launcher at %s; install Git for Windows or set HERMES_GIT_BASH_PATH",
+            found,
+        )
 
     raise RuntimeError(
         "Git Bash not found. Hermes Agent requires Git for Windows on Windows.\n"
