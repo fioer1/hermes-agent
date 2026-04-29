@@ -2,6 +2,22 @@
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
+## Repository Sync Workflow
+
+Before changing remotes, rebasing local branches, or force-pushing, read
+[`SYNC_WORKFLOW.md`](SYNC_WORKFLOW.md).
+
+This repo is part of a two-repo setup:
+
+1. `Hermes Agent`
+2. `Hermes WebUI`
+
+The sync guide records:
+
+- which remote must be `origin` and which must be `upstream`
+- the safe sequence for backup, rebase/cherry-pick, verification, and push
+- what another machine's AI assistant should inspect before touching history
+
 ## Development Environment
 
 ```bash
