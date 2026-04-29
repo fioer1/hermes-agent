@@ -576,6 +576,7 @@ class HindsightMemoryProvider(MemoryProvider):
         # Recall controls
         self._auto_recall = True
         self._recall_max_tokens = 4096
+        self._recall_result_limit = 0
         self._recall_types: list[str] | None = None
         self._recall_prompt_preamble = ""
         self._recall_max_input_chars = 800
@@ -859,6 +860,7 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "retain_async","description": "Process retain asynchronously on the Hindsight server", "default": True},
             {"key": "retain_context", "description": "Context label for retained memories", "default": "conversation between Hermes Agent and the User"},
             {"key": "recall_max_tokens", "description": "Maximum tokens for recall results", "default": 4096},
+            {"key": "recall_result_limit", "description": "Maximum number of recalled memory results to inject automatically (0 = no explicit limit)", "default": 0},
             {"key": "recall_max_input_chars", "description": "Maximum input query length for auto-recall", "default": 800},
             {"key": "recall_prompt_preamble", "description": "Custom preamble for recalled memories in context"},
             {"key": "timeout", "description": "API request timeout in seconds", "default": _DEFAULT_TIMEOUT},
@@ -1177,6 +1179,7 @@ class HindsightMemoryProvider(MemoryProvider):
         # Recall controls
         self._auto_recall = self._config.get("auto_recall", True)
         self._recall_max_tokens = int(self._config.get("recall_max_tokens", 4096))
+        self._recall_result_limit = max(0, int(self._config.get("recall_result_limit", 0) or 0))
         self._recall_types = self._config.get("recall_types") or None
         self._recall_prompt_preamble = self._config.get("recall_prompt_preamble", "")
         self._recall_max_input_chars = int(self._config.get("recall_max_input_chars", 800))
@@ -1195,9 +1198,11 @@ class HindsightMemoryProvider(MemoryProvider):
                          self._bank_id_template, self._agent_identity, self._agent_workspace,
                          self._platform, self._user_id, self._bank_id)
         logger.debug("Hindsight config: auto_retain=%s, auto_recall=%s, retain_every_n=%d, "
-                     "retain_async=%s, retain_context=%s, recall_max_tokens=%d, recall_max_input_chars=%d, tags=%s, recall_tags=%s",
+                     "retain_async=%s, retain_context=%s, "
+                     "recall_max_tokens=%d, recall_result_limit=%d, recall_max_input_chars=%d, tags=%s, recall_tags=%s",
                      self._auto_retain, self._auto_recall, self._retain_every_n_turns,
-                     self._retain_async, self._retain_context, self._recall_max_tokens, self._recall_max_input_chars,
+                     self._retain_async, self._retain_context,
+                     self._recall_max_tokens, self._recall_result_limit, self._recall_max_input_chars,
                      self._tags, self._recall_tags)
 
         # For local mode, start the embedded daemon in the background so it
@@ -1286,6 +1291,11 @@ class HindsightMemoryProvider(MemoryProvider):
         )
         return f"{header}\n\n{result}"
 
+    def _limit_recall_results(self, results):
+        if not self._recall_result_limit:
+            return results
+        return list(results or [])[: self._recall_result_limit]
+
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         if self._memory_mode == "tools":
             logger.debug("Prefetch: skipped (tools-only mode)")
@@ -1319,9 +1329,10 @@ class HindsightMemoryProvider(MemoryProvider):
                     logger.debug("Prefetch: calling recall (bank=%s, query_len=%d, budget=%s)",
                                  self._bank_id, len(query), self._budget)
                     resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
-                    num_results = len(resp.results) if resp.results else 0
+                    results = self._limit_recall_results(resp.results or [])
+                    num_results = len(results)
                     logger.debug("Prefetch: recall returned %d results", num_results)
-                    text = "\n".join(f"- {r.text}" for r in resp.results if r.text) if resp.results else ""
+                    text = "\n".join(f"- {r.text}" for r in results if r.text) if results else ""
                 if text:
                     with self._prefetch_lock:
                         self._prefetch_result = text
@@ -1523,11 +1534,12 @@ class HindsightMemoryProvider(MemoryProvider):
                 logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s",
                              self._bank_id, len(query), self._budget)
                 resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
-                num_results = len(resp.results) if resp.results else 0
+                results = self._limit_recall_results(resp.results or [])
+                num_results = len(results)
                 logger.debug("Tool hindsight_recall: %d results", num_results)
-                if not resp.results:
+                if not results:
                     return json.dumps({"result": "No relevant memories found."})
-                lines = [f"{i}. {r.text}" for i, r in enumerate(resp.results, 1)]
+                lines = [f"{i}. {r.text}" for i, r in enumerate(results, 1)]
                 return json.dumps({"result": "\n".join(lines)})
             except Exception as e:
                 logger.warning("hindsight_recall failed: %s", e, exc_info=True)

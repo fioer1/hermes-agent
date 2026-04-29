@@ -1605,6 +1605,12 @@ class MCPServerTask:
 
 _servers: Dict[str, MCPServerTask] = {}
 
+# Failed initial discovery attempts are memoized briefly so callers that invoke
+# discover_mcp_tools() per request do not pay the full retry/backoff cost on
+# every turn when a configured server is offline or misconfigured.
+_FAILED_DISCOVERY_BACKOFF_SECONDS = 300
+_failed_server_backoff: Dict[str, tuple[float, str]] = {}
+
 # Circuit breaker: consecutive error counts per server.  After
 # _CIRCUIT_BREAKER_THRESHOLD consecutive failures, the handler returns
 # a "server unreachable" message that tells the model to stop retrying,
@@ -2901,6 +2907,19 @@ def _existing_tool_names() -> List[str]:
     return names
 
 
+def _discovery_fingerprint(cfg: dict) -> str:
+    """Return a stable, non-secret fingerprint for MCP connection settings."""
+    if not isinstance(cfg, dict):
+        return ""
+    subset = {
+        "command": cfg.get("command"),
+        "args": cfg.get("args"),
+        "url": cfg.get("url"),
+        "transport": cfg.get("transport"),
+    }
+    return json.dumps(subset, sort_keys=True, default=str)
+
+
 def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> List[str]:
     """Register tools from an already-connected server into the registry.
 
@@ -3058,14 +3077,30 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
         logger.debug("No explicit MCP servers provided")
         return []
 
-    # Only attempt servers that aren't already connected and are enabled
-    # (enabled: false skips the server entirely without removing its config)
+    # Only attempt servers that aren't already connected, are enabled, and are
+    # not in the short failed-discovery backoff window.
     with _lock:
-        new_servers = {
-            k: v
-            for k, v in servers.items()
-            if k not in _servers and _parse_boolish(v.get("enabled", True), default=True)
-        }
+        now = time.monotonic()
+        skipped_backoff: List[str] = []
+        new_servers = {}
+        for k, v in servers.items():
+            if k in _servers or not _parse_boolish(v.get("enabled", True), default=True):
+                continue
+            fingerprint = _discovery_fingerprint(v)
+            backoff = _failed_server_backoff.get(k)
+            if backoff:
+                retry_after, failed_fingerprint = backoff
+                if failed_fingerprint == fingerprint and retry_after > now:
+                    skipped_backoff.append(k)
+                    continue
+                _failed_server_backoff.pop(k, None)
+            new_servers[k] = v
+
+    if skipped_backoff:
+        logger.debug(
+            "Skipping MCP server discovery during failed-server backoff: %s",
+            ", ".join(sorted(skipped_backoff)),
+        )
 
     if not new_servers:
         return _existing_tool_names()
@@ -3086,6 +3121,11 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
         )
         for name, result in zip(server_names, results):
             if isinstance(result, Exception):
+                with _lock:
+                    _failed_server_backoff[name] = (
+                        time.monotonic() + _FAILED_DISCOVERY_BACKOFF_SECONDS,
+                        _discovery_fingerprint(new_servers.get(name, {})),
+                    )
                 command = new_servers.get(name, {}).get("command")
                 logger.warning(
                     "Failed to connect to MCP server '%s'%s: %s",
@@ -3093,6 +3133,9 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
                     f" (command={command})" if command else "",
                     _format_connect_error(result),
                 )
+            else:
+                with _lock:
+                    _failed_server_backoff.pop(name, None)
 
     # Per-server timeouts are handled inside _discover_and_register_server.
     # The outer timeout is generous: 120s total for parallel discovery.
@@ -3134,7 +3177,8 @@ def discover_mcp_tools() -> List[str]:
     the ``mcp`` package is not installed (returns empty list).
 
     Idempotent for already-connected servers. If some servers failed on a
-    previous call, only the missing ones are retried.
+    previous call, they are retried after a short backoff or immediately when
+    their connection settings change.
 
     Returns:
         List of all registered MCP tool names.

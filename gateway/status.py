@@ -136,6 +136,31 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
     return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
 
 
+def _pid_exists(pid: int) -> bool:
+    """Return True if a process exists without sending it a signal."""
+    if pid <= 0:
+        return False
+    if _IS_WINDOWS:
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            process = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if process:
+                kernel32.CloseHandle(process)
+                return True
+            return False
+        except Exception:
+            return False
+
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except ProcessLookupError:
+        return False
+
+
 def _looks_like_gateway_process(pid: int) -> bool:
     """Return True when the live PID still looks like the Hermes gateway."""
     cmdline = _read_process_cmdline(pid)
@@ -145,9 +170,12 @@ def _looks_like_gateway_process(pid: int) -> bool:
     patterns = (
         "hermes_cli.main gateway",
         "hermes_cli/main.py gateway",
+        "hermes_cli\\main.py gateway",
         "hermes gateway",
         "hermes-gateway",
+        "hermes.exe gateway",
         "gateway/run.py",
+        "gateway\\run.py",
     )
     return any(pattern in cmdline for pattern in patterns)
 
@@ -165,8 +193,12 @@ def _record_looks_like_gateway(record: dict[str, Any]) -> bool:
     patterns = (
         "hermes_cli.main gateway",
         "hermes_cli/main.py gateway",
+        "hermes_cli\\main.py gateway",
         "hermes gateway",
+        "hermes-gateway",
+        "hermes.exe gateway",
         "gateway/run.py",
+        "gateway\\run.py",
     )
     return any(pattern in cmdline for pattern in patterns)
 
@@ -218,7 +250,10 @@ def _read_pid_record(pid_path: Optional[Path] = None) -> Optional[dict]:
     if not pid_path.exists():
         return None
 
-    raw = pid_path.read_text().strip()
+    try:
+        raw = pid_path.read_text().strip()
+    except OSError:
+        return None
     if not raw:
         return None
 
@@ -238,7 +273,10 @@ def _read_pid_record(pid_path: Optional[Path] = None) -> Optional[dict]:
 
 
 def _read_gateway_lock_record(lock_path: Optional[Path] = None) -> Optional[dict[str, Any]]:
-    return _read_pid_record(lock_path or _get_gateway_lock_path())
+    resolved_lock_path = lock_path or _get_gateway_lock_path()
+    if _gateway_lock_handle is not None and resolved_lock_path == _get_gateway_lock_path():
+        return _build_pid_record()
+    return _read_pid_record(resolved_lock_path)
 
 
 def _pid_from_record(record: Optional[dict[str, Any]]) -> Optional[int]:

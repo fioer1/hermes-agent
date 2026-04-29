@@ -115,8 +115,9 @@ def cron_list(show_all: bool = False):
 
         print()
 
+    from gateway.status import get_running_pid
     from hermes_cli.gateway import find_gateway_pids
-    if not find_gateway_pids():
+    if get_running_pid() is None and not find_gateway_pids():
         print(color("  ⚠  Gateway is not running — jobs won't fire automatically.", Colors.YELLOW))
         print(color("     Start it with: hermes gateway install", Colors.DIM))
         print(color("                    sudo hermes gateway install --system  # Linux servers", Colors.DIM))
@@ -132,11 +133,13 @@ def cron_tick():
 def cron_status():
     """Show cron execution status."""
     from cron.jobs import list_jobs
+    from gateway.status import get_running_pid
     from hermes_cli.gateway import find_gateway_pids
 
     print()
 
-    pids = find_gateway_pids()
+    running_pid = get_running_pid()
+    pids = [running_pid] if running_pid is not None else find_gateway_pids()
     if pids:
         print(color("✓ Gateway is running — cron jobs will fire automatically", Colors.GREEN))
         print(f"  PID: {', '.join(map(str, pids))}")

@@ -48,6 +48,22 @@ def _make_mock_server(name, session=None, tools=None):
     return server
 
 
+@pytest.fixture(autouse=True)
+def _clear_mcp_failed_backoff():
+    """Keep MCP discovery failure state isolated between tests."""
+    try:
+        import tools.mcp_tool as mcp_mod
+        mcp_mod._failed_server_backoff.clear()
+    except Exception:
+        pass
+    yield
+    try:
+        import tools.mcp_tool as mcp_mod
+        mcp_mod._failed_server_backoff.clear()
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
@@ -1021,8 +1037,8 @@ class TestToolsetInjection:
         assert "mcp_broken_ping" not in result
         assert call_count == 2
 
-    def test_partial_failure_retry_on_second_call(self):
-        """Failed servers are retried on subsequent discover_mcp_tools() calls."""
+    def test_partial_failure_retries_when_settings_change(self):
+        """Failed servers retry immediately once their config fingerprint changes."""
         from tools.mcp_tool import MCPServerTask
 
         mock_tools = [_make_mcp_tool("ping", "Ping")]
@@ -1030,6 +1046,10 @@ class TestToolsetInjection:
 
         # Use a real dict so idempotency logic works correctly
         fresh_servers = {}
+        current_config = {
+            "broken": {"command": "bad"},
+            "good": {"command": "npx", "args": []},
+        }
         call_count = 0
         broken_fixed = False
 
@@ -1043,17 +1063,13 @@ class TestToolsetInjection:
             server._tools = mock_tools
             return server
 
-        fake_config = {
-            "broken": {"command": "bad"},
-            "good": {"command": "npx", "args": []},
-        }
         fake_toolsets = {
             "hermes-cli": {"tools": [], "description": "CLI", "includes": []},
         }
 
         with patch("tools.mcp_tool._MCP_AVAILABLE", True), \
              patch("tools.mcp_tool._servers", fresh_servers), \
-             patch("tools.mcp_tool._load_mcp_config", return_value=fake_config), \
+             patch("tools.mcp_tool._load_mcp_config", side_effect=lambda: current_config), \
              patch("tools.mcp_tool._connect_server", side_effect=flaky_connect), \
              patch("toolsets.TOOLSETS", fake_toolsets):
             from tools.mcp_tool import discover_mcp_tools
@@ -1062,10 +1078,13 @@ class TestToolsetInjection:
             result1 = discover_mcp_tools()
             assert "mcp_good_ping" in result1
             assert "mcp_broken_ping" not in result1
-            first_attempts = call_count
 
-            # "Fix" the broken server
+            # "Fix" the broken server and change config so the fingerprint differs.
             broken_fixed = True
+            current_config = {
+                "broken": {"command": "bad", "args": ["--retry"]},
+                "good": {"command": "npx", "args": []},
+            }
             call_count = 0
 
             # Second call: should retry broken, skip good
@@ -2988,6 +3007,36 @@ class TestMCPServerTaskSamplingIntegration:
 
 class TestDiscoveryFailedCount:
     """Verify discover_mcp_tools() correctly tracks failed server connections."""
+
+    def test_failed_server_is_not_retried_immediately(self):
+        """A failed MCP server is skipped on the next discovery call."""
+        import tools.mcp_tool as mcp_mod
+        from tools.mcp_tool import discover_mcp_tools, _ensure_mcp_loop
+
+        fake_config = {
+            "bad_server": {"command": "npx", "args": ["bad"]},
+        }
+        attempts = []
+
+        async def always_fail(name, cfg):
+            attempts.append(name)
+            raise ConnectionError("Connection refused")
+
+        try:
+            with patch("tools.mcp_tool._load_mcp_config", return_value=fake_config), \
+                 patch("tools.mcp_tool._discover_and_register_server", side_effect=always_fail), \
+                 patch("tools.mcp_tool._MCP_AVAILABLE", True), \
+                 patch("tools.mcp_tool._existing_tool_names", return_value=[]):
+                _ensure_mcp_loop()
+
+                discover_mcp_tools()
+                discover_mcp_tools()
+
+            assert attempts == ["bad_server"]
+        finally:
+            mcp_mod._servers.pop("bad_server", None)
+            if hasattr(mcp_mod, "_failed_server_backoff"):
+                mcp_mod._failed_server_backoff.pop("bad_server", None)
 
     def test_failed_server_increments_failed_count(self):
         """When _discover_and_register_server raises, failed_count increments."""
